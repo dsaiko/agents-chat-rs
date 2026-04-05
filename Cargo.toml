@@ -2,6 +2,12 @@
 name = "agents-chat"
 version = "0.1.0"
 edition = "2024"
+description = "Multi-agent AI debate simulator supporting OpenAI, Anthropic, and Ollama"
+license = "MIT"
+repository = "https://github.com/dsaiko/agents-chat-rs"
+authors = ["Dušan Saiko"]
+keywords = ["ai", "llm", "agents", "debate", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 # Async runtime
