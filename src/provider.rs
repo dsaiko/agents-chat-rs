@@ -86,13 +86,8 @@ impl FromIterator<(String, Box<dyn Provider>)> for Providers {
 /// Models prefixed with `ollama/` route to Ollama (prefix stripped),
 /// `openrouter/` route to OpenRouter (prefix stripped), `claude*` routes to
 /// Anthropic, and all others route to OpenAI.
-///
-/// `ollama-` is kept as a legacy compatibility alias for existing Rust demos.
 pub fn resolve_model(model: &str) -> (&str, &str) {
     if let Some(m) = model.strip_prefix("ollama/") {
-        return (PROVIDER_OLLAMA, m);
-    }
-    if let Some(m) = model.strip_prefix("ollama-") {
         return (PROVIDER_OLLAMA, m);
     }
     if let Some(m) = model.strip_prefix("openrouter/") {
@@ -217,8 +212,6 @@ pub mod tests {
             ),
             ("claude-haiku-4-5", PROVIDER_ANTHROPIC, "claude-haiku-4-5"),
             ("ollama/qwen3:8b", PROVIDER_OLLAMA, "qwen3:8b"),
-            ("ollama-qwen3:8b", PROVIDER_OLLAMA, "qwen3:8b"),
-            ("ollama-llama3", PROVIDER_OLLAMA, "llama3"),
             (
                 "openrouter/qwen/qwen3.6-plus:free",
                 PROVIDER_OPENROUTER,
