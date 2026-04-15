@@ -181,7 +181,11 @@ agents:
         assert_eq!(demo.question, "What is Go?");
         assert_eq!(demo.agents.len(), 2);
         assert_eq!(demo.agents[0].name, "Alpha");
+        assert_eq!(demo.agents[0].model, "gpt-4o");
+        assert_eq!(demo.agents[0].prompt, "Be concise.");
         assert_eq!(demo.agents[1].name, "Beta");
+        assert_eq!(demo.agents[1].model, "gpt-5-mini");
+        assert_eq!(demo.agents[1].prompt, "Be critical.");
     }
 
     #[test]
@@ -204,7 +208,11 @@ agents:
 
         let demo = Demo::load(&path).unwrap();
         assert_eq!(demo.agents[0].name, "Zeta");
+        assert_eq!(demo.agents[0].model, "gpt-4o");
+        assert_eq!(demo.agents[0].prompt, "First in file.");
         assert_eq!(demo.agents[1].name, "Alpha");
+        assert_eq!(demo.agents[1].model, "gpt-4o");
+        assert_eq!(demo.agents[1].prompt, "Second in file.");
     }
 
     #[test]
