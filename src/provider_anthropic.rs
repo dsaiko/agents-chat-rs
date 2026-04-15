@@ -1,46 +1,68 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{GenerateParams, Provider, DEFAULT_MAX_TOKENS};
+use crate::provider::{DEFAULT_MAX_TOKENS, GenerateParams, Provider};
 
-/// Anthropic Messages API request body.
-/// No official Rust SDK exists, so we use reqwest with manual serde types.
-/// This is simpler and more maintainable than depending on an unofficial crate
-/// for what amounts to a single HTTP POST call.
 #[derive(Serialize)]
-struct AnthropicRequest {
-    model: String,
+struct AnthropicRequest<'a> {
+    model: &'a str,
     max_tokens: u32,
-    messages: Vec<AnthropicMessage>,
+    messages: Vec<AnthropicMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
 }
 
 #[derive(Serialize)]
-struct AnthropicMessage {
-    role: String,
-    content: String,
+struct AnthropicMessage<'a> {
+    role: &'a str,
+    content: &'a str,
 }
 
-/// Anthropic Messages API response body.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct AnthropicResponse {
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
     content: Vec<ContentBlock>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ContentBlock {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     block_type: String,
     #[serde(default)]
     text: String,
 }
 
+fn parse_anthropic_response(response: &AnthropicResponse) -> anyhow::Result<String> {
+    match response.stop_reason.as_deref() {
+        None | Some("end_turn") | Some("stop_sequence") => {}
+        Some("max_tokens") => anyhow::bail!("response incomplete: stopped at max_tokens"),
+        Some("refusal") => anyhow::bail!("response refused"),
+        Some(reason) => anyhow::bail!("unsupported stop reason: {reason}"),
+    }
+
+    let text = response
+        .content
+        .iter()
+        .filter(|block| block.block_type == "text")
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("");
+
+    let text = text.trim().to_string();
+    if text.is_empty() && !response.content.is_empty() {
+        anyhow::bail!("response contained no text output");
+    }
+
+    Ok(text)
+}
+
 /// Implements Provider using the Anthropic Messages API via raw HTTP.
-///
-/// Go uses the official `anthropic-sdk-go`; Rust has no official SDK.
-/// We make a direct POST to `https://api.anthropic.com/v1/messages`
-/// with `x-api-key` and `anthropic-version` headers.
 pub struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
@@ -64,7 +86,6 @@ impl Provider for AnthropicProvider {
         user_prompt: &str,
         params: &GenerateParams,
     ) -> anyhow::Result<String> {
-        // Anthropic requires max_tokens — default to DEFAULT_MAX_TOKENS if not set.
         let max_tokens = if params.max_tokens > 0 {
             params.max_tokens
         } else {
@@ -72,20 +93,18 @@ impl Provider for AnthropicProvider {
         };
 
         let request = AnthropicRequest {
-            model: model.to_string(),
+            model,
             max_tokens,
             messages: vec![AnthropicMessage {
-                role: "user".to_string(),
-                content: user_prompt.to_string(),
+                role: "user",
+                content: user_prompt,
             }],
-            system: if system_prompt.is_empty() {
-                None
-            } else {
-                Some(system_prompt.to_string())
-            },
+            system: (!system_prompt.is_empty()).then_some(system_prompt),
+            temperature: params.temperature,
+            top_p: params.top_p,
         };
 
-        let resp = self
+        let response = self
             .client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
@@ -95,23 +114,87 @@ impl Provider for AnthropicProvider {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
             anyhow::bail!("Anthropic API error {status}: {body}");
         }
 
-        let response: AnthropicResponse = resp.json().await?;
+        let response: AnthropicResponse = response.json().await?;
+        parse_anthropic_response(&response)
+    }
 
-        // Extract text blocks from response — mirrors Go's loop over `msg.Content`.
-        let text: String = response
-            .content
-            .iter()
-            .filter(|block| block.block_type == "text")
-            .map(|block| block.text.as_str())
-            .collect::<Vec<_>>()
-            .join("");
+    async fn health_check(&self) -> anyhow::Result<()> {
+        let response = self
+            .client
+            .get("https://api.anthropic.com/v1/models?limit=1")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await?;
 
-        Ok(text.trim().to_string())
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("anthropic health check failed: {status}: {body}");
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_anthropic_response_completed() {
+        let response = AnthropicResponse {
+            stop_reason: Some("end_turn".to_string()),
+            content: vec![ContentBlock {
+                block_type: "text".to_string(),
+                text: " hello ".to_string(),
+            }],
+        };
+
+        assert_eq!(parse_anthropic_response(&response).unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_parse_anthropic_response_refusal() {
+        let response = AnthropicResponse {
+            stop_reason: Some("refusal".to_string()),
+            content: vec![],
+        };
+
+        assert!(parse_anthropic_response(&response).is_err());
+    }
+
+    #[test]
+    fn test_parse_anthropic_response_max_tokens() {
+        let response = AnthropicResponse {
+            stop_reason: Some("max_tokens".to_string()),
+            content: vec![],
+        };
+
+        assert!(
+            parse_anthropic_response(&response)
+                .unwrap_err()
+                .to_string()
+                .contains("max_tokens")
+        );
+    }
+
+    #[test]
+    fn test_parse_anthropic_response_without_text_errors() {
+        let response = AnthropicResponse {
+            stop_reason: Some("end_turn".to_string()),
+            content: vec![ContentBlock {
+                block_type: "tool_use".to_string(),
+                text: String::new(),
+            }],
+        };
+
+        assert!(parse_anthropic_response(&response).is_err());
     }
 }

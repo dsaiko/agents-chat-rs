@@ -4,20 +4,21 @@ A multi-agent AI debate simulator written in Rust. Two or more AI agents with di
 
 ## Features
 
-- **Multiple LLM providers** — OpenAI, Anthropic (Claude), and Ollama in a single debate
-- **Automatic language detection** — UI strings are translated to match the question's language
-- **Configurable debates** — define agents, models, personalities, and round count via simple Markdown files
-- **Mixed-provider debates** — e.g. GPT vs Claude arguing the same topic
-- **Conversation history** — agents see prior exchanges (last 8 entries) for coherent multi-turn debate
-- **15-minute timeout** — prevents runaway sessions
+- **Multi-provider support** — OpenAI, Anthropic (Claude), OpenRouter, and local Ollama models can be mixed in the same debate
+- **Automatic language detection and translation** — the first agent's model detects the question language and translates UI strings dynamically
+- **YAML-based configuration** — agents, personalities, and questions can be defined as `.yaml` files in the same format as the Go version
+- **Per-agent model selection** — each agent can use a different model and provider
+- **Demo scenarios** — bundled demos cover OpenAI, Anthropic, Ollama, and OpenRouter combinations
+- **Legacy Markdown compatibility** — existing `.md` demos still load, but YAML is the primary format
 
 ## Requirements
 
 - Rust 2024 edition (1.85+)
-- At least one LLM provider configured:
-  - **OpenAI** — set `OPENAI_API_KEY`
-  - **Anthropic** — set `ANTHROPIC_API_KEY`
-  - **Ollama** — running locally (reads `OLLAMA_HOST`, defaults to `localhost:11434`)
+- At least one provider configured:
+  - `OPENAI_API_KEY`
+  - `ANTHROPIC_API_KEY`
+  - `OPENROUTER_API_KEY`
+  - local Ollama instance (`OLLAMA_HOST` optional, defaults to localhost)
 
 ## Installation
 
@@ -29,85 +30,76 @@ cargo build --release
 
 ```bash
 # Run a demo by path
-agents-chat demos/flat_earth_en
+cargo run -- demos/flat_earth_en
 
 # Or set DEMO_DIR (resolved relative to demos/)
-DEMO_DIR=flat_earth_en agents-chat
+DEMO_DIR=flat_earth_en cargo run
 ```
 
-### Environment Variables
+## Configuration
 
-| Variable            | Description                          |
-|---------------------|--------------------------------------|
-| `OPENAI_API_KEY`    | OpenAI API key                       |
-| `ANTHROPIC_API_KEY` | Anthropic API key                    |
-| `OLLAMA_HOST`       | Ollama server address                |
-| `DEMO_DIR`          | Default demo directory (under `demos/`) |
-| `RUST_LOG`          | Logging level (e.g. `debug`, `info`) |
+Each demo is a directory under `demos/` containing YAML files.
 
-## Demo Structure
+### `question.yaml`
 
-Each demo is a directory containing Markdown files:
-
-```
-demos/flat_earth_en/
-├── Question.md      # The debate topic
-├── AgentA.md        # First agent definition
-└── AgentB.md        # Second agent definition
-```
-
-### Question.md
-
-Optional frontmatter with `rounds` (defaults to 5). The body is the debate question.
-
-```markdown
----
+```yaml
 rounds: 5
----
-Is the Earth flat or round? Defend your position.
+question: Is the Earth flat or round? Defend your position.
 ```
 
-### Agent Files
+| Field | Description | Default |
+|-------|-------------|---------|
+| `rounds` | Number of debate rounds | `5` |
 
-Each agent file has frontmatter with `name`, `model`, and optional `max_tokens`. The body is the agent's system prompt.
+### Agent files
 
-```markdown
----
+```yaml
 name: Alice
 model: gpt-5.3-chat-latest
----
-You are Alice, a passionate flat Earth believer. You are loud,
-confrontational, and absolutely convinced the Earth is flat.
-Keep it to 2-3 punchy sentences max.
+max_tokens: 2048
+temperature: 0.9
+top_p: 0.95
+instructions: |
+  You are Alice, a passionate flat Earth believer.
+  You are loud, confrontational, and absolutely convinced the Earth is flat.
 ```
 
-### Model Routing
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Display name of the agent |
+| `model` | yes | Model ID that determines provider routing |
+| `max_tokens` | no | Maximum response tokens (`0` means provider default; Anthropic falls back to `1024`) |
+| `temperature` | no | Sampling temperature (`0` is valid and distinct from unset) |
+| `top_p` | no | Nucleus sampling threshold |
+| `instructions` | no | System prompt for the agent |
 
-Models are routed to providers by prefix:
+### Model routing
 
-| Prefix      | Provider  | Example                          |
-|-------------|-----------|----------------------------------|
-| `claude*`   | Anthropic | `claude-sonnet-4-6`              |
-| `ollama-*`  | Ollama    | `ollama-qwen3:8b` (prefix stripped) |
-| *(default)* | OpenAI    | `gpt-5.3-chat-latest`           |
+| Prefix | Provider | Example |
+|--------|----------|---------|
+| `ollama/` | Ollama | `ollama/qwen3:8b` |
+| `openrouter/` | OpenRouter | `openrouter/qwen/qwen3.6-plus:free` |
+| `claude*` | Anthropic | `claude-sonnet-4-6` |
+| default | OpenAI | `gpt-5.3-chat-latest` |
 
-## Included Demos
+Legacy `ollama-` model prefixes are still accepted for older Markdown demos.
 
-| Demo                   | Language   | Providers           |
-|------------------------|------------|---------------------|
-| `flat_earth_en`        | English    | OpenAI + Anthropic  |
-| `flat_earth_cz`        | Czech      | OpenAI + Anthropic  |
-| `flat_earth_de`        | German     | OpenAI + Anthropic  |
-| `flat_earth_es`        | Spanish    | OpenAI + Anthropic  |
-| `flat_earth_fr`        | French     | OpenAI + Anthropic  |
-| `flat_earth_jp`        | Japanese   | OpenAI + Anthropic  |
-| `flat_earth_pt`        | Portuguese | OpenAI + Anthropic  |
-| `flat_earth_cn`        | Chinese    | OpenAI + Anthropic  |
-| `flat_earth_ollama_en` | English    | Ollama              |
-| `flat_earth_ollama_cz` | Czech      | Ollama              |
-| `better_times_cz`      | Czech      | OpenAI + Anthropic  |
+## Included demos
 
-## Running Tests
+- `flat_earth_en`
+- `flat_earth_cz`
+- `flat_earth_de`
+- `flat_earth_es`
+- `flat_earth_fr`
+- `flat_earth_jp`
+- `flat_earth_pt`
+- `flat_earth_cn`
+- `flat_earth_ollama_en`
+- `flat_earth_ollama_cz`
+- `flat_earth_openrouter_cz`
+- `better_times_cz`
+
+## Tests
 
 ```bash
 cargo test

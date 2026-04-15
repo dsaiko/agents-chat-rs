@@ -4,6 +4,7 @@ mod provider;
 mod provider_anthropic;
 mod provider_ollama;
 mod provider_openai;
+mod provider_openrouter;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -11,15 +12,20 @@ use std::time::Duration;
 use clap::Parser;
 
 use demo::{Agent, Demo};
-use language::{detect_language, Language};
-use provider::{GenerateParams, Providers, PROVIDER_ANTHROPIC, PROVIDER_OLLAMA, PROVIDER_OPENAI};
+use language::{Language, detect_language};
+use provider::{
+    GenerateParams, PROVIDER_ANTHROPIC, PROVIDER_OLLAMA, PROVIDER_OPENAI, PROVIDER_OPENROUTER,
+    Providers,
+};
 use provider_anthropic::AnthropicProvider;
 use provider_ollama::OllamaProvider;
 use provider_openai::OpenAiProvider;
+use provider_openrouter::OpenRouterProvider;
 
 /// Maximum number of history entries to include in the prompt.
 /// Older entries are truncated to stay within LLM context limits.
 const MAX_HISTORY: usize = 8;
+const PROVIDER_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Multi-agent debate simulator — AI agents with different personalities
 /// argue a topic, potentially using different LLM providers in the same conversation.
@@ -56,12 +62,12 @@ async fn main() -> anyhow::Result<()> {
 
     let providers = init_providers();
 
-    // Verify all agents have a working provider
-    for agent in &demo.agents {
-        if let Err(e) = providers.for_model(&agent.model) {
-            anyhow::bail!("agent {} (model {}): {e}", agent.name, agent.model);
-        }
-    }
+    tokio::time::timeout(
+        PROVIDER_HEALTH_CHECK_TIMEOUT,
+        validate_agent_providers(&providers, &demo.agents),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("provider validation timed out after 10 seconds"))??;
 
     // Go uses context.WithTimeout(15 minutes); Rust uses tokio::time::timeout.
     tokio::time::timeout(Duration::from_secs(900), run_debate(&providers, &demo))
@@ -85,7 +91,10 @@ async fn run_debate(providers: &Providers, demo: &Demo) -> anyhow::Result<()> {
     let mut history = vec![format!("{}: {}", lang.moderator, demo.question)];
 
     for i in 1..=demo.rounds {
-        println!("\n\u{2500}\u{2500} {} \u{2500}\u{2500}", lang.round(i, demo.rounds));
+        println!(
+            "\n\u{2500}\u{2500} {} \u{2500}\u{2500}",
+            lang.round(i, demo.rounds)
+        );
         for agent in &demo.agents {
             let reply = run_agent(providers, &lang, agent, &history).await?;
             let indented = format!("    {}", reply.replace('\n', "\n    "));
@@ -115,6 +124,8 @@ async fn run_agent(
             &prompt,
             &GenerateParams {
                 max_tokens: agent.max_tokens,
+                temperature: agent.temperature,
+                top_p: agent.top_p,
             },
         )
         .await?;
@@ -129,16 +140,20 @@ async fn run_agent(
 /// Constructs the user prompt from conversation history,
 /// keeping only the last MAX_HISTORY entries to stay within context limits.
 fn build_prompt(lang: &Language, history: &[String]) -> String {
-    let start = if history.len() > MAX_HISTORY {
-        history.len() - MAX_HISTORY
+    let lines: Vec<&String> = if history.len() > MAX_HISTORY {
+        let tail_start = history.len() - (MAX_HISTORY - 1);
+        let mut lines = Vec::with_capacity(MAX_HISTORY);
+        lines.push(&history[0]);
+        lines.extend(history[tail_start..].iter());
+        lines
     } else {
-        0
+        history.iter().collect()
     };
 
     let mut result = String::new();
     result.push_str(&lang.conversation_pre);
     result.push_str("\n\n");
-    for line in &history[start..] {
+    for line in lines {
         result.push_str(line);
         result.push('\n');
     }
@@ -168,22 +183,45 @@ fn init_providers() -> Providers {
         );
     }
 
-    // Ollama doesn't require an API key — it reads OLLAMA_HOST from env.
-    // Go uses api.ClientFromEnvironment() which succeeds if Ollama is reachable.
-    // We always register the Ollama provider; connection errors happen at generate() time.
-    providers.insert(
-        PROVIDER_OLLAMA.to_string(),
-        Box::new(OllamaProvider::new()),
-    );
+    if let Ok(provider) = OllamaProvider::from_environment() {
+        providers.insert(PROVIDER_OLLAMA.to_string(), Box::new(provider));
+    }
+
+    if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+        providers.insert(
+            PROVIDER_OPENROUTER.to_string(),
+            Box::new(OpenRouterProvider::new(&key)),
+        );
+    }
 
     providers
+}
+
+async fn validate_agent_providers(providers: &Providers, agents: &[Agent]) -> anyhow::Result<()> {
+    let mut checked = std::collections::HashSet::new();
+
+    for agent in agents {
+        let (provider, _) = providers
+            .for_model(&agent.model)
+            .map_err(|e| anyhow::anyhow!("agent {} (model {}): {e}", agent.name, agent.model))?;
+        let (provider_name, _) = provider::resolve_model(&agent.model);
+        if checked.insert(provider_name) {
+            provider.health_check().await.map_err(|e| {
+                anyhow::anyhow!("agent {} (model {}): {e}", agent.name, agent.model)
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::language::default_language;
-    use crate::provider::tests::MockProvider;
+    use crate::provider::tests::{MockHealthProvider, MockProvider};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn test_run_agent_with_mock() {
@@ -197,11 +235,15 @@ mod tests {
             name: "Test".to_string(),
             model: "gpt-4o".to_string(),
             max_tokens: 0,
+            temperature: None,
+            top_p: None,
             instructions: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Test question".to_string()];
 
-        let reply = run_agent(&providers, &lang, &agent, &history).await.unwrap();
+        let reply = run_agent(&providers, &lang, &agent, &history)
+            .await
+            .unwrap();
         assert_eq!(reply, "Hello from mock");
     }
 
@@ -215,14 +257,43 @@ mod tests {
         let lang = default_language();
         let agent = Agent {
             name: "Test".to_string(),
-            model: "ollama-qwen3:8b".to_string(),
+            model: "ollama/qwen3:8b".to_string(),
             max_tokens: 0,
+            temperature: None,
+            top_p: None,
             instructions: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Test question".to_string()];
 
-        let reply = run_agent(&providers, &lang, &agent, &history).await.unwrap();
+        let reply = run_agent(&providers, &lang, &agent, &history)
+            .await
+            .unwrap();
         assert_eq!(reply, "Hello from Ollama");
+    }
+
+    #[tokio::test]
+    async fn test_run_agent_with_openrouter_model() {
+        let providers = Providers::from_iter([(
+            PROVIDER_OPENROUTER.to_string(),
+            Box::new(MockProvider::new("Hello from OpenRouter"))
+                as Box<dyn crate::provider::Provider>,
+        )]);
+
+        let lang = default_language();
+        let agent = Agent {
+            name: "Test".to_string(),
+            model: "openrouter/google/gemma-2-9b-it".to_string(),
+            max_tokens: 0,
+            temperature: None,
+            top_p: None,
+            instructions: "Be helpful.".to_string(),
+        };
+        let history = vec!["Moderator: Test question".to_string()];
+
+        let reply = run_agent(&providers, &lang, &agent, &history)
+            .await
+            .unwrap();
+        assert_eq!(reply, "Hello from OpenRouter");
     }
 
     #[tokio::test]
@@ -237,11 +308,15 @@ mod tests {
             name: "Test".to_string(),
             model: "gpt-4o".to_string(),
             max_tokens: 0,
+            temperature: None,
+            top_p: None,
             instructions: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Hi".to_string()];
 
-        let reply = run_agent(&providers, &lang, &agent, &history).await.unwrap();
+        let reply = run_agent(&providers, &lang, &agent, &history)
+            .await
+            .unwrap();
         assert_eq!(reply, lang.empty_reply);
     }
 
@@ -257,11 +332,17 @@ mod tests {
             name: "Test".to_string(),
             model: "gpt-4o".to_string(),
             max_tokens: 0,
+            temperature: None,
+            top_p: None,
             instructions: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Hi".to_string()];
 
-        assert!(run_agent(&providers, &lang, &agent, &history).await.is_err());
+        assert!(
+            run_agent(&providers, &lang, &agent, &history)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -288,9 +369,75 @@ mod tests {
 
         let prompt = build_prompt(&lang, &history);
 
-        assert!(!prompt.contains("Entry 0"), "should not contain Entry 0 (truncated)");
-        assert!(!prompt.contains("Entry 1"), "should not contain Entry 1 (truncated)");
-        assert!(prompt.contains("Entry 2"), "should contain Entry 2");
+        assert!(
+            prompt.contains("Entry 0"),
+            "should contain Entry 0 (topic pinned)"
+        );
+        assert!(
+            !prompt.contains("Entry 1"),
+            "should not contain Entry 1 (truncated)"
+        );
+        assert!(
+            !prompt.contains("Entry 2"),
+            "should not contain Entry 2 (truncated)"
+        );
+        assert!(prompt.contains("Entry 3"), "should contain Entry 3");
         assert!(prompt.contains("Entry 9"), "should contain Entry 9");
+    }
+
+    #[tokio::test]
+    async fn test_validate_agent_providers_health_check_once_per_provider() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let providers = Providers::from_iter([(
+            PROVIDER_OPENAI.to_string(),
+            Box::new(MockHealthProvider::with_counter(calls.clone()))
+                as Box<dyn crate::provider::Provider>,
+        )]);
+
+        let agents = vec![
+            Agent {
+                name: "A".to_string(),
+                model: "gpt-4o".to_string(),
+                max_tokens: 0,
+                temperature: None,
+                top_p: None,
+                instructions: String::new(),
+            },
+            Agent {
+                name: "B".to_string(),
+                model: "gpt-5-mini".to_string(),
+                max_tokens: 0,
+                temperature: None,
+                top_p: None,
+                instructions: String::new(),
+            },
+        ];
+
+        validate_agent_providers(&providers, &agents).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_validate_agent_providers_health_check_error() {
+        let providers = Providers::from_iter([(
+            PROVIDER_OPENAI.to_string(),
+            Box::new(MockHealthProvider::with_health_error("boom"))
+                as Box<dyn crate::provider::Provider>,
+        )]);
+
+        let agents = vec![Agent {
+            name: "A".to_string(),
+            model: "gpt-4o".to_string(),
+            max_tokens: 0,
+            temperature: None,
+            top_p: None,
+            instructions: String::new(),
+        }];
+
+        let err = validate_agent_providers(&providers, &agents)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("boom"));
     }
 }

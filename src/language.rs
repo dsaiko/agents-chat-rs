@@ -38,7 +38,9 @@ pub fn default_language() -> Language {
         round_format: "Round %d/%d".to_string(),
         empty_reply: "(empty reply)".to_string(),
         conversation_pre: "Conversation so far:".to_string(),
-        conversation_post: "Reply as the next participant of the debate. Write nothing beyond your reply.".to_string(),
+        conversation_post:
+            "Reply as the next participant of the debate. Write nothing beyond your reply."
+                .to_string(),
         language: "Detected language: English".to_string(),
     }
 }
@@ -69,7 +71,16 @@ Text:
     );
 
     let result = match provider
-        .generate(resolved_model, "", &prompt, &GenerateParams { max_tokens: 0 })
+        .generate(
+            resolved_model,
+            "",
+            &prompt,
+            &GenerateParams {
+                max_tokens: 0,
+                temperature: None,
+                top_p: None,
+            },
+        )
         .await
     {
         Ok(v) => v,
@@ -99,14 +110,54 @@ pub fn parse_language_json(raw: &str) -> Language {
         Err(_) => return default_language(),
     };
 
-    // Validate that RoundFormat contains %d placeholders
-    if lang.round_format.is_empty() || !lang.round_format.contains("%d") {
-        let mut fixed = lang;
-        fixed.round_format = default_language().round_format;
-        return fixed;
+    let lang = Language {
+        moderator: lang.moderator.trim().to_string(),
+        round_format: lang.round_format.trim().to_string(),
+        empty_reply: lang.empty_reply.trim().to_string(),
+        conversation_pre: lang.conversation_pre.trim().to_string(),
+        conversation_post: lang.conversation_post.trim().to_string(),
+        language: lang.language.trim().to_string(),
+    };
+
+    if lang.moderator.is_empty()
+        || lang.empty_reply.is_empty()
+        || lang.conversation_pre.is_empty()
+        || lang.conversation_post.is_empty()
+        || lang.language.is_empty()
+        || !valid_round_format(&lang.round_format)
+    {
+        return default_language();
     }
 
     lang
+}
+
+fn valid_round_format(format: &str) -> bool {
+    if format.is_empty() {
+        return false;
+    }
+
+    let bytes = format.as_bytes();
+    let mut placeholders = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= bytes.len() {
+            return false;
+        }
+        match bytes[i] {
+            b'%' => {}
+            b'd' => placeholders += 1,
+            _ => return false,
+        }
+        i += 1;
+    }
+
+    placeholders == 2
 }
 
 #[cfg(test)]
@@ -139,6 +190,13 @@ mod tests {
         let json = r#"{"moderator":"M","round_format":"Runde","empty_reply":"(e)","conversation_pre":"P:","conversation_post":"P.","detected_language":"L"}"#;
         let lang = parse_language_json(json);
         assert_eq!(lang.round_format, default_language().round_format);
+    }
+
+    #[test]
+    fn test_parse_language_json_partial_defaults() {
+        let json = r#"{"moderator":"Mod","round_format":"R %d/%d"}"#;
+        let lang = parse_language_json(json);
+        assert_eq!(lang, default_language());
     }
 
     #[test]
