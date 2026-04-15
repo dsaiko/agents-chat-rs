@@ -132,18 +132,18 @@ pub(crate) fn parse_openai_compatible_response(
     match response.status.as_deref() {
         None | Some("completed") => {}
         Some("failed") => {
-            if let Some(error) = &response.error {
-                if !error.message.is_empty() {
-                    anyhow::bail!("response failed: {}", error.message);
-                }
+            if let Some(error) = &response.error
+                && !error.message.is_empty()
+            {
+                anyhow::bail!("response failed: {}", error.message);
             }
             anyhow::bail!("response failed");
         }
         Some("incomplete") => {
-            if let Some(details) = &response.incomplete_details {
-                if !details.reason.is_empty() {
-                    anyhow::bail!("response incomplete: {}", details.reason);
-                }
+            if let Some(details) = &response.incomplete_details
+                && !details.reason.is_empty()
+            {
+                anyhow::bail!("response incomplete: {}", details.reason);
             }
             anyhow::bail!("response incomplete");
         }

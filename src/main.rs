@@ -26,14 +26,15 @@ use provider_openrouter::OpenRouterProvider;
 /// Older entries are truncated to stay within LLM context limits.
 const MAX_HISTORY: usize = 8;
 const PROVIDER_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const DEMO_FILE_ENV: &str = "DEMO_FILE";
 
 /// Multi-agent debate simulator — AI agents with different personalities
 /// argue a topic, potentially using different LLM providers in the same conversation.
 #[derive(Parser)]
 #[command(name = "agents-chat", about = "Multi-agent AI debate simulator")]
 struct Cli {
-    /// Path to the demo directory (overrides DEMO_DIR env var)
-    demo_dir: Option<PathBuf>,
+    /// Path to a demo YAML file or bare demo name (overrides DEMO_FILE env var)
+    demo_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -44,20 +45,17 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Resolve demo directory: CLI arg takes priority, then DEMO_DIR env var.
-    // Go: os.Args[1] || filepath.Join("demos", os.Getenv("DEMO_DIR"))
-    let demo_dir = match cli.demo_dir {
-        Some(dir) => dir,
-        None => match std::env::var("DEMO_DIR") {
-            Ok(dir) => PathBuf::from("demos").join(dir),
-            Err(_) => anyhow::bail!("usage: agents-chat <demo-dir> or set DEMO_DIR"),
-        },
-    };
+    // Resolve demo file: CLI arg takes priority, then DEMO_FILE env var.
+    let demo_file = resolve_demo_path(match cli.demo_file {
+        Some(path) => path,
+        None => demo_path_from_env()
+            .ok_or_else(|| anyhow::anyhow!("usage: agents-chat <demo-file> or set DEMO_FILE"))?,
+    });
 
-    let demo = Demo::load(&demo_dir)?;
+    let demo = Demo::load(&demo_file)?;
 
     if demo.agents.len() < 2 {
-        anyhow::bail!("need at least 2 agent files");
+        anyhow::bail!("need at least 2 agents");
     }
 
     let providers = init_providers();
@@ -75,6 +73,18 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("debate timed out after 15 minutes"))??;
 
     Ok(())
+}
+
+fn resolve_demo_path(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() || path.is_absolute() || path.components().count() > 1 {
+        path
+    } else {
+        PathBuf::from("demos").join(path).with_extension("yaml")
+    }
+}
+
+fn demo_path_from_env() -> Option<PathBuf> {
+    std::env::var(DEMO_FILE_ENV).ok().map(PathBuf::from)
 }
 
 /// Runs the complete debate session — language detection, then rounds of agent responses.
@@ -120,7 +130,7 @@ async fn run_agent(
     let text = provider
         .generate(
             model,
-            agent.instructions.trim(),
+            agent.prompt.trim(),
             &prompt,
             &GenerateParams {
                 max_tokens: agent.max_tokens,
@@ -237,7 +247,7 @@ mod tests {
             max_tokens: 0,
             temperature: None,
             top_p: None,
-            instructions: "Be helpful.".to_string(),
+            prompt: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Test question".to_string()];
 
@@ -261,7 +271,7 @@ mod tests {
             max_tokens: 0,
             temperature: None,
             top_p: None,
-            instructions: "Be helpful.".to_string(),
+            prompt: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Test question".to_string()];
 
@@ -286,7 +296,7 @@ mod tests {
             max_tokens: 0,
             temperature: None,
             top_p: None,
-            instructions: "Be helpful.".to_string(),
+            prompt: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Test question".to_string()];
 
@@ -310,7 +320,7 @@ mod tests {
             max_tokens: 0,
             temperature: None,
             top_p: None,
-            instructions: "Be helpful.".to_string(),
+            prompt: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Hi".to_string()];
 
@@ -334,7 +344,7 @@ mod tests {
             max_tokens: 0,
             temperature: None,
             top_p: None,
-            instructions: "Be helpful.".to_string(),
+            prompt: "Be helpful.".to_string(),
         };
         let history = vec!["Moderator: Hi".to_string()];
 
@@ -385,6 +395,30 @@ mod tests {
         assert!(prompt.contains("Entry 9"), "should contain Entry 9");
     }
 
+    #[test]
+    fn test_resolve_demo_path_bare_name() {
+        assert_eq!(
+            resolve_demo_path(PathBuf::from("flat_earth_en")),
+            PathBuf::from("demos/flat_earth_en.yaml")
+        );
+    }
+
+    #[test]
+    fn test_resolve_demo_path_explicit_file() {
+        assert_eq!(
+            resolve_demo_path(PathBuf::from("custom/demo.yaml")),
+            PathBuf::from("custom/demo.yaml")
+        );
+    }
+
+    #[test]
+    fn test_resolve_demo_path_does_not_guess_nested_path() {
+        assert_eq!(
+            resolve_demo_path(PathBuf::from("demos/flat_earth_en")),
+            PathBuf::from("demos/flat_earth_en")
+        );
+    }
+
     #[tokio::test]
     async fn test_validate_agent_providers_health_check_once_per_provider() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -401,7 +435,7 @@ mod tests {
                 max_tokens: 0,
                 temperature: None,
                 top_p: None,
-                instructions: String::new(),
+                prompt: String::new(),
             },
             Agent {
                 name: "B".to_string(),
@@ -409,7 +443,7 @@ mod tests {
                 max_tokens: 0,
                 temperature: None,
                 top_p: None,
-                instructions: String::new(),
+                prompt: String::new(),
             },
         ];
 
@@ -431,7 +465,7 @@ mod tests {
             max_tokens: 0,
             temperature: None,
             top_p: None,
-            instructions: String::new(),
+            prompt: String::new(),
         }];
 
         let err = validate_agent_providers(&providers, &agents)
